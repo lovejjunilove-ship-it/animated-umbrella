@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kart Rider 3D: Multiplayer Firestore</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, deleteDoc, collection, query } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
+
+        // 유저 제공 설정 적용
+        const firebaseConfig = {
+            apiKey: "AIzaSyAb2IlxndRfeHcry7cYQofobQyF3Zhyit8",
+            authDomain: "zkem-3faed.firebaseapp.com",
+            projectId: "zkem-3faed",
+            storageBucket: "zkem-3faed.firebasestorage.app",
+            messagingSenderId: "772076896735",
+            appId: "1:772076896735:web:99677f78fce1d1ed77846a",
+            measurementId: "G-ERWBCS3SHF"
+        };
+
+        // 전역 변수 설정
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        window.FB_APP = app;
+        window.FB_AUTH = auth;
+        window.FB_DB = db;
+        // Firestore 관련 함수들을 전역으로 노출하여 하단 일반 스크립트에서 사용 가능케 함
+        window.FS_METHODS = { doc, setDoc, deleteDoc, collection };
+        
+        window.MY_UID = null;
+        window.OTHER_PLAYERS = {}; 
+        window.APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'highway-racing-v1';
+
+        // 익명 로그인 시도
+        const initAuth = async () => {
+            try {
+                await signInAnonymously(auth);
+            } catch (error) {
+                console.warn("멀티플레이어 인증 실패 (익명 로그인 비활성화됨). 로컬 모드로 시작합니다.");
+                // 인증 실패 시 즉시 로컬 UID 생성하여 게임 지연 방지
+                if (!window.MY_UID) {
+                    window.MY_UID = 'local-' + Math.random().toString(36).substr(2, 9);
+                    updateConnStatus("SINGLE PLAYER MODE", "bg-red-600/60");
+                }
+            }
+        };
+
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                window.MY_UID = user.uid;
+                console.log("인증 완료 UID:", user.uid);
+                updateConnStatus("MULTIPLAYER ONLINE", "bg-green-600/60");
+                startMultiplayerSync();
+            }
+        });
+
+        function updateConnStatus(text, bgClass) {
+            const el = document.getElementById('conn-status');
+            if (el) {
+                el.innerText = text;
+                el.className = `${bgClass} px-2 py-1 rounded border border-white/10 text-white font-bold uppercase`;
+            }
+        }
+
+        function startMultiplayerSync() {
+            if (!window.MY_UID || window.MY_UID.startsWith('local-')) return;
+            
+            const playersCol = collection(db, 'artifacts', window.APP_ID, 'public', 'data', 'players');
+            
+            onSnapshot(query(playersCol), (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    const data = change.doc.data();
+                    const uid = change.doc.id;
+                    if (uid === window.MY_UID) return;
+
+                    if (change.type === "added" || change.type === "modified") {
+                        updateOtherPlayer(uid, data);
+                    } else if (change.type === "removed") {
+                        removeOtherPlayer(uid);
+                    }
+                });
+            }, (err) => {
+                console.warn("Firestore 동기화 권한 에러:", err);
+            });
+
+            window.addEventListener('beforeunload', async () => {
+                if (window.MY_UID && !window.MY_UID.startsWith('local-')) {
+                    const myDoc = doc(db, 'artifacts', window.APP_ID, 'public', 'data', 'players', window.MY_UID);
+                    await deleteDoc(myDoc);
+                }
+            });
+        }
+
+        function updateOtherPlayer(uid, data) {
+            if (!window.SCENE_REF) return;
+            if (!window.OTHER_PLAYERS[uid]) {
+                const group = new THREE.Group();
+                const body = new THREE.Mesh(
+                    new THREE.BoxGeometry(1.2, 0.6, 2.2),
+                    new THREE.MeshStandardMaterial({ color: 0x3366ff, metalness: 0.5, roughness: 0.5 })
+                );
+                body.position.y = 0.5;
+                group.add(body);
+                
+                const wheelGeom = new THREE.CylinderGeometry(0.35, 0.35, 0.4, 16);
+                const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+                for(let i=0; i<4; i++) {
+                    const w = new THREE.Mesh(wheelGeom, wheelMat);
+                    w.rotation.z = Math.PI/2;
+                    w.position.set(i < 2 ? 0.7 : -0.7, 0.35, i % 2 === 0 ? 0.8 : -0.8);
+                    group.add(w);
+                }
+                window.SCENE_REF.add(group);
+                window.OTHER_PLAYERS[uid] = group;
+            }
+            const target = window.OTHER_PLAYERS[uid];
+            target.position.set(data.x, 0, data.z);
+            target.rotation.y = data.ry;
+        }
+
+        function removeOtherPlayer(uid) {
+            if (window.OTHER_PLAYERS[uid] && window.SCENE_REF) {
+                window.SCENE_REF.remove(window.OTHER_PLAYERS[uid]);
+                delete window.OTHER_PLAYERS[uid];
+            }
+        }
+    </script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Pretendard', sans-serif; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; color: white; }
+        .info-panel { background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(10px); border-radius: 16px; padding: 16px; border: 1px solid rgba(255,255,255,0.1); }
+        .status-bar { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; }
+        .status-fill { height: 100%; transition: width 0.3s; }
+        .menu-card { pointer-events: auto; cursor: pointer; transition: all 0.3s; }
+        .menu-card:hover { transform: translateY(-10px); border-color: #ffd700; }
+        .mode-btn { pointer-events: auto; cursor: pointer; transition: all 0.2s; }
+        .mode-btn.active { background-color: #ffd700; color: black; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div id="ui-layer">
+    <div class="absolute top-5 left-5 flex flex-col gap-2">
+        <div class="flex gap-2 text-[10px]">
+            <span id="conn-status" class="bg-black/60 px-2 py-1 rounded border border-white/10 text-yellow-500 font-bold uppercase">Connecting...</span>
+        </div>
+        <div class="mt-2">
+            <h1 class="text-2xl font-black italic text-white uppercase tracking-tighter">Highway Racing Online</h1>
+            <p id="current-map-display" class="text-[10px] text-blue-400 font-bold tracking-widest uppercase">Select Map</p>
+        </div>
+    </div>
+
+    <div class="absolute top-5 right-5 flex flex-col gap-3 items-end">
+        <div class="info-panel text-right min-w-[200px]">
+            <div class="text-[10px] text-gray-400 uppercase">Speed</div>
+            <div class="text-4xl font-black italic"><span id="speed-val">0</span> <span class="text-sm font-normal text-gray-400">km/h</span></div>
+            <div class="mt-4 space-y-3">
+                <div>
+                    <div class="flex justify-between text-[9px] mb-1 uppercase font-bold text-green-400"><span>Fuel</span><span id="fuel-txt">100%</span></div>
+                    <div class="status-bar"><div id="fuel-bar" class="status-fill bg-green-500" style="width: 100%;"></div></div>
+                </div>
+                <div>
+                    <div class="flex justify-between text-[9px] mb-1 uppercase font-bold text-blue-400"><span>Engine</span><span id="engine-txt">100%</span></div>
+                    <div class="status-bar"><div id="engine-bar" class="status-fill bg-blue-500" style="width: 100%;"></div></div>
+                </div>
+                <div>
+                    <div class="flex justify-between text-[9px] mb-1 uppercase font-bold text-orange-400"><span>Tire</span><span id="tire-txt">100%</span></div>
+                    <div class="status-bar"><div id="tire-bar" class="status-fill bg-orange-500" style="width: 100%;"></div></div>
+                </div>
+            </div>
+            <div class="mt-4 flex justify-between items-center border-t border-white/10 pt-2">
+                <span class="text-[10px] text-gray-400">LAP</span>
+                <span class="text-lg font-bold text-yellow-400" id="lap-info">1 / 3</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-menu" class="absolute inset-0 flex items-center justify-center bg-black/90 pointer-events-auto transition-opacity duration-500 z-50">
+        <div class="text-center w-full max-w-4xl px-10">
+            <h2 class="text-5xl font-black italic mb-2 text-white uppercase tracking-tighter">Highway Racing Online</h2>
+            <p class="text-gray-400 mb-8 font-light">멀티플레이를 위해 Firebase 익명 로그인이 권장됩니다.</p>
+            <div class="flex justify-center gap-4 mb-10">
+                <div id="btn-day" class="mode-btn active px-8 py-3 rounded-full border border-white/20 bg-white/5" onclick="setTheme('day')">☀️ DAY</div>
+                <div id="btn-night" class="mode-btn px-8 py-3 rounded-full border border-white/20 bg-white/5" onclick="setTheme('night')">🌙 NIGHT</div>
+            </div>
+            <div class="grid grid-cols-2 gap-8">
+                <div class="menu-card p-10 bg-zinc-900 border-2 border-zinc-800 rounded-3xl" onclick="selectMap('highway')">
+                    <div class="h-24 bg-gradient-to-br from-blue-600 to-indigo-900 rounded-xl mb-6 flex items-center justify-center text-4xl">🛣️</div>
+                    <div class="font-bold text-xl mb-1 text-white uppercase">Ultra Highway</div>
+                </div>
+                <div class="menu-card p-10 bg-zinc-900 border-2 border-zinc-800 rounded-3xl" onclick="selectMap('express')">
+                    <div class="h-24 bg-gradient-to-br from-red-600 to-orange-900 rounded-xl mb-6 flex items-center justify-center text-4xl">🏎️</div>
+                    <div class="font-bold text-xl mb-1 text-white uppercase">City Circuit</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="msg" class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-8xl font-black text-yellow-400 scale-150 opacity-0 transition-all duration-300">START</div>
+</div>
+
+<script>
+/**
+ * Game Core Logic
+ */
+
+let scene, camera, renderer, kart, sun, ambient;
+let speed = 0, angle = 0;
+let currentMap = null, selectedTheme = 'day';
+let lap = 1, startTime = 0, gameActive = false;
+let fuel = 100, engine = 100, tire = 100;
+let pitZones = [], highPasses = [];
+const keys = {};
+
+const MAP_CONFIGS = {
+    highway: {
+        points: [new THREE.Vector3(0, 0, 0), new THREE.Vector3(300, 0, 0), new THREE.Vector3(600, 0, 150), new THREE.Vector3(800, 0, 500), new THREE.Vector3(700, 0, 900), new THREE.Vector3(300, 0, 1100), new THREE.Vector3(-300, 0, 1000), new THREE.Vector3(-600, 0, 600), new THREE.Vector3(-500, 0, 200), new THREE.Vector3(-200, 0, 0), new THREE.Vector3(0, 0, 0)],
+        pits: [{x: 450, z: 80}], highpass: [{x: 150, z: 0}, {x: -300, z: 1050}]
+    },
+    express: {
+        points: [new THREE.Vector3(0, 0, 0), new THREE.Vector3(500, 0, 0), new THREE.Vector3(500, 0, 500), new THREE.Vector3(0, 0, 500), new THREE.Vector3(0, 0, 0)],
+        pits: [{x: 250, z: -15}], highpass: [{x: 100, z: 0}]
+    }
+};
+
+const THEME_DATA = {
+    day: { bg: 0x87ceeb, fog: 0x87ceeb, sun: 1.0, amb: 0.6, wall: 0x999999 },
+    night: { bg: 0x010205, fog: 0x010205, sun: 0.2, amb: 0.2, wall: 0x555555 }
+};
+
+function setTheme(mode) {
+    selectedTheme = mode;
+    document.getElementById('btn-day').classList.toggle('active', mode === 'day');
+    document.getElementById('btn-night').classList.toggle('active', mode === 'night');
+}
+
+function init() {
+    scene = new THREE.Scene();
+    window.SCENE_REF = scene;
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambient);
+    sun = new THREE.DirectionalLight(0xffffff, 1.0);
+    sun.position.set(200, 500, 200);
+    sun.castShadow = true;
+    scene.add(sun);
+
+    const kartGroup = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.6, 2.2), new THREE.MeshStandardMaterial({ color: 0xff3333, metalness: 0.7, roughness: 0.2 }));
+    body.position.y = 0.5;
+    body.castShadow = true;
+    kartGroup.add(body);
+    const wheelGeom = new THREE.CylinderGeometry(0.35, 0.35, 0.4, 16);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    for(let i=0; i<4; i++) {
+        const w = new THREE.Mesh(wheelGeom, wheelMat);
+        w.rotation.z = Math.PI/2;
+        w.position.set(i < 2 ? 0.7 : -0.7, 0.35, i % 2 === 0 ? 0.8 : -0.8);
+        kartGroup.add(w);
+    }
+    kart = kartGroup;
+    scene.add(kart);
+
+    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keyup', e => keys[e.code] = false);
+    
+    animate();
+    setInterval(syncMyLocation, 100);
+}
+
+async function syncMyLocation() {
+    // MY_UID가 없거나 local 모드이면 Firestore 전송 생략
+    if (!window.MY_UID || !window.FB_DB || !gameActive || window.MY_UID.startsWith('local-')) return;
+    
+    try {
+        const { doc, setDoc } = window.FS_METHODS;
+        const myDoc = doc(window.FB_DB, 'artifacts', window.APP_ID, 'public', 'data', 'players', window.MY_UID);
+        
+        await setDoc(myDoc, {
+            x: kart.position.x,
+            z: kart.position.z,
+            ry: kart.rotation.y,
+            lastSeen: Date.now()
+        }, { merge: true });
+    } catch (e) {
+        console.warn("Firestore 업데이트 실패:", e);
+    }
+}
+
+function selectMap(type) {
+    currentMap = type;
+    const config = MAP_CONFIGS[type];
+    const theme = THEME_DATA[selectedTheme];
+
+    const toRemove = scene.children.filter(c => c !== kart && c !== sun && c !== ambient && !Object.values(window.OTHER_PLAYERS).includes(c));
+    toRemove.forEach(c => scene.remove(c));
+    pitZones = []; highPasses = [];
+
+    scene.background = new THREE.Color(theme.bg);
+    scene.fog = new THREE.Fog(theme.fog, 100, 800);
+    sun.intensity = theme.sun;
+    ambient.intensity = theme.amb;
+    
+    const path = new THREE.CatmullRomCurve3(config.points);
+    const roadWidth = 22;
+    const trackGeom = new THREE.TubeGeometry(path, 512, roadWidth, 8, false);
+    const trackMesh = new THREE.Mesh(trackGeom, new THREE.MeshStandardMaterial({ color: 0x1a1a1a }));
+    trackMesh.scale.y = 0.005; trackMesh.position.y = 0.05;
+    scene.add(trackMesh);
+
+    config.highpass.forEach(pos => {
+        const gate = new THREE.Group();
+        const frame = new THREE.Mesh(new THREE.BoxGeometry(26, 12, 2), new THREE.MeshStandardMaterial({color: 0x0044ff}));
+        frame.position.y = 6;
+        gate.add(frame);
+        gate.position.set(pos.x, 0, pos.z);
+        scene.add(gate);
+        highPasses.push(gate);
+    });
+
+    config.pits.forEach(pos => {
+        createPitBay(pos.x - 15, pos.z, 0x2ecc71, 'fuel');
+        createPitBay(pos.x, pos.z, 0xe74c3c, 'repair');
+        createPitBay(pos.x + 15, pos.z, 0xe67e22, 'tire');
+    });
+
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(10000, 10000), new THREE.MeshStandardMaterial({ color: theme.bg }));
+    ground.rotation.x = -Math.PI/2;
+    scene.add(ground);
+
+    resetGame();
+    document.getElementById('main-menu').style.opacity = '0';
+    setTimeout(() => {
+        document.getElementById('main-menu').style.display = 'none';
+        gameActive = true;
+        startTime = Date.now();
+        showMsg("GO!");
+    }, 500);
+}
+
+function createPitBay(x, z, color, type) {
+    const pad = new THREE.Mesh(new THREE.PlaneGeometry(10, 12), new THREE.MeshBasicMaterial({color: color, transparent: true, opacity: 0.4}));
+    pad.rotation.x = -Math.PI/2;
+    pad.position.set(x, 0.15, z);
+    scene.add(pad);
+    pitZones.push({ type: type, position: new THREE.Vector3(x, 0, z) });
+}
+
+function handlePhysics() {
+    if(!gameActive) return;
+    if(Math.abs(speed) > 0.05) { fuel -= 0.005; tire -= 0.003; if(speed > 0.2) engine -= 0.002; }
+    let penalty = (fuel <= 0 || engine <= 0 || tire <= 0) ? 0.3 : 1.0;
+    const maxAccel = 0.015 * penalty;
+    const friction = 0.985;
+    const maxSpeed = 0.42;
+    if (keys['KeyW']) speed += maxAccel;
+    if (keys['KeyS']) speed -= maxAccel * 0.7;
+    speed *= friction;
+    if (speed > maxSpeed) speed = maxSpeed;
+    if (keys['KeyA']) angle += 0.04;
+    if (keys['KeyD']) angle -= 0.04;
+    kart.position.x += Math.sin(angle) * speed;
+    kart.position.z += Math.cos(angle) * speed;
+    kart.rotation.y = angle;
+    pitZones.forEach(zone => {
+        if(kart.position.distanceTo(zone.position) < 6) {
+            speed *= 0.95;
+            if(zone.type === 'fuel') fuel = Math.min(100, fuel + 0.3);
+            if(zone.type === 'repair') engine = Math.min(100, engine + 0.2);
+            if(zone.type === 'tire') tire = Math.min(100, tire + 0.25);
+        }
+    });
+    updateUI();
+}
+
+function resetGame() {
+    kart.position.set(0, 0, 0); speed = 0; angle = 0;
+    fuel = 100; engine = 100; tire = 100;
+}
+
+function updateUI() {
+    document.getElementById('fuel-bar').style.width = fuel + '%';
+    document.getElementById('engine-bar').style.width = engine + '%';
+    document.getElementById('tire-bar').style.width = tire + '%';
+    document.getElementById('speed-val').innerText = Math.floor(Math.abs(speed) * 400);
+}
+
+function showMsg(text) {
+    const el = document.getElementById('msg');
+    el.innerText = text; el.style.opacity = '1';
+    setTimeout(() => el.style.opacity = '0', 1200);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    handlePhysics();
+    const camOffset = new THREE.Vector3(0, 4.5, -10).applyQuaternion(kart.quaternion);
+    camera.position.lerp(kart.position.clone().add(camOffset), 0.1);
+    camera.lookAt(kart.position);
+    renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+init();
+</script>
+</body>
+</html>
